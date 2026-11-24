@@ -1,0 +1,13 @@
+[package]
+name = "enroot-to-oci"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+hpc-image-store = { git = "https://github.com/sarus-suite/cluster-tooling", rev = "49c6f24716e08bc16b5e31cf8779cb957afc411d" }
+raster = { git = "https://github.com/sarus-suite/cluster-tooling", rev = "49c6f24716e08bc16b5e31cf8779cb957afc411d" }
+
+[dev-dependencies]
+tempfile = "3"

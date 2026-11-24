@@ -4,16 +4,56 @@ A CSCS Container Engine user should be able to convert an existing Enroot Squash
 
 The [Bats suites](tests/) exercise the conversion behavior specified below. Deployment context is available in the [Container Engine documentation](https://docs.cscs.ch/software/container-engine/) and the [Sarus Suite project](https://github.com/sarus-suite).
 
-## 1. Establish the CLI and exercise the store library
+## 1. Establish the CLI and exercise the store library (implemented)
 
 ```text
 enroot-to-oci [--store PATH] [--skip-dynamic-env | --resolve-host-env] [--allow-unrecognized-rc] [--] IMAGE.sqsh IMAGE_TAG
 ```
 
-- [ ] Keep flags before the positional arguments and honor the end-of-options marker. Preserve exit status 2 for help, invalid arguments, and conflicting environment flags. Interpret the positional tag as the requested CAS destination.
-- [ ] Pin the cluster-tooling Cargo dependencies to the inspected `oci-cas` revision `49c6f24716e08bc16b5e31cf8779cb957afc411d` and commit the converter's Cargo.lock. [Upstream source](https://github.com/sarus-suite/cluster-tooling/tree/49c6f24716e08bc16b5e31cf8779cb957afc411d)
-- [ ] Load Sarus configuration through `raster::load_config_xdg(raster::config::VarExpand::Must, &None)`. Select `Config::hpc_image_store` unless the caller supplies `--store PATH`. Use the configured Podman path for staging, cleanup, and transfer, and the configured Skopeo path for transfer. [Raster configuration](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/raster/src/config.rs)
-- [ ] **Acceptance:** Build with the lockfile. From a local rootless Podman store, import a small fixture through the Rust library and resolve it in a temporary user-owned CAS. Repeat with an isolated Sarus configuration and a distinct override path, verifying which store received each reference. Record the prepared-parent and user-namespace requirements in the runner setup. Check that the devcontainer provides Skopeo with the transfer capabilities required by upstream. [Transfer requirements](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/user-guide.md)
+- [x] Use Clap's derived parser for options, the `--` separator, the two required operands, help, and usage errors.
+  Accept options anywhere before `--`, including `--store PATH` and `--store=PATH`.
+  Allow one `--store` option and treat repeated boolean flags as a single occurrence.
+  Use the store library's `ImageSelector` to parse `IMAGE_TAG` as the requested CAS destination.
+  Clap prints `-h` and `--help` to stdout with status 0 and reports invalid usage, including conflicting environment flags, to stderr with status 2.
+  Return errors for configuration and conversion failures.
+  [hpc-image-store CLI](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/src/main.rs), [sarusctl CLI](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/sarusctl/src/main.rs)
+- [x] Pin the cluster-tooling Cargo dependencies to the inspected `oci-cas` revision `49c6f24716e08bc16b5e31cf8779cb957afc411d` and commit the converter's Cargo.lock. [Upstream source](https://github.com/sarus-suite/cluster-tooling/tree/49c6f24716e08bc16b5e31cf8779cb957afc411d)
+- [x] Load Sarus configuration through `raster::load_config_xdg(raster::config::VarExpand::Must, &None)`. Select `Config::hpc_image_store` unless the caller supplies `--store PATH`. Use the configured Podman path for staging, cleanup, and transfer, and the configured Skopeo path for transfer. [Raster configuration](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/raster/src/config.rs)
+- [x] **Acceptance:** Build with the lockfile. From a local rootless Podman store, import a small fixture through the Rust library and resolve it in a temporary user-owned CAS. Repeat with an isolated Sarus configuration and a distinct override path, verifying which store received each reference. Record the prepared-parent and user-namespace requirements in the runner setup. Check that the devcontainer provides Skopeo with the transfer capabilities required by upstream. [Transfer requirements](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/user-guide.md)
+
+### Stage 1 runner setup
+
+The Rust binary validates arguments and loads Sarus configuration. Use
+`enroot-to-oci.sh` for SquashFS conversion during this stage.
+
+Run the smoke test as an ordinary user with rootless Podman and Skopeo.
+In the devcontainer, run as `vscode`. Podman and Skopeo must inherit the same
+local containers-storage configuration and user namespace. The runner needs
+working user namespaces and subordinate UID/GID mappings. The devcontainer
+startup check verifies Skopeo's shared-blob and digest-preservation flags.
+
+```sh
+cargo build --locked
+cargo test --locked
+cargo test --locked --test stage_one rootless_store_smoke -- --ignored --nocapture
+```
+
+If the tools require an existing rootless user namespace, run the smoke test
+with `podman unshare` before the last Cargo command.
+
+Use a prepared, writable temporary location for the smoke test. It creates
+and syncs a private immediate parent for both CAS roots under `TMPDIR` (or
+the system temporary directory). The parent and the directory entries needed
+to reach it must be durable. For a missing CAS root, its immediate parent must
+allow the user to create entries and open and sync the directory. The store
+library initializes the CAS root. Use paths without a colon for Skopeo's OCI
+transport. [Preparing a store](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/administration.md)
+
+On 2026-11-24, the locked build and four CLI tests passed. The smoke test
+passed as `vscode` with rootless Podman 5.4.2 using overlay storage and
+Skopeo 1.18.0. Each destination resolved to the digest reported by the store
+library and was absent from the other CAS. The devcontainer startup check
+passed with those tools.
 
 ## 2. Port extraction, metadata recovery, and Podman staging
 

@@ -6,7 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates bats acl \
         bzip2 tar curl pkg-config util-linux squashfs-tools jq acl attr \
-        podman uidmap passt crun iptables fuse-overlayfs \
+        podman skopeo uidmap passt crun iptables fuse-overlayfs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY containers.conf /etc/containers/containers.conf
