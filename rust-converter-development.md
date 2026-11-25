@@ -55,7 +55,7 @@ Skopeo 1.18.0. Each destination resolved to the digest reported by the store
 library and was absent from the other CAS. The devcontainer startup check
 passed with those tools.
 
-## 2. Port extraction, metadata recovery, and Podman staging
+## 2. Port extraction, metadata recovery, and Podman staging (implemented)
 
 Recognize the following consecutive lines in a regular `/etc/rc`. Allow whitespace variation in the generated `mkdir` form. Match the `cd` line exactly, with the same quoted absolute path. Exclude paths containing a backslash, dollar sign, or backtick. Read the first `# enroot-provenance: ` marker and set `org.opencontainers.image.source` if its value is nonempty. [Enroot startup generator](https://github.com/NVIDIA/enroot/blob/main/src/docker.sh), [image format](https://github.com/NVIDIA/enroot/blob/main/doc/image-format.md)
 
@@ -71,13 +71,34 @@ Recognize only `${NAME}` with an ASCII shell identifier for host substitution. R
 | Work item | Acceptance evidence |
 | --- | --- |
 | Extract with unsquashfs into a private temporary directory. Validate the staged paths before reading or editing configuration. | A corrupt input or a symlink at /etc, /etc/rc, /etc/environment, or /etc/fstab fails before import. The input image checksum survives conversion. |
-| Recover WorkingDir from exactly one recognized generated command pair and remove those two lines from the staged /etc/rc. Preserve its startup, default command, argument forwarding, and rc.local handling. | The image honors its recovered directory and a runtime workdir override. With zero or multiple pairs, reject by default. The explicit rc override preserves the script byte for byte and warns. |
-| Select /bin/bash for rc when available, or /usr/bin/bash when that is the image's only Bash. Preserve the empty image Cmd. | Add a fixture for the /usr/bin/bash-only layout. Reject an rc without Bash and use the documented /bin/sh fallback when rc is absent. |
-| Parse Enroot assignments and one-pass host substitutions as data. Preserve quoting rules, literal characters, and last-assignment-wins behavior. Filter reserved names and warn on malformed assignments. | Cover dynamic names, skipped assignments clearing earlier values, later static assignments restoring them, unset host values, and CR/LF rejection. Test explicit policies, a single controlling-terminal prompt with default omission, and unattended failure before import. |
+| Recover WorkingDir from exactly one recognized generated command pair. Validate that the path is valid UTF-8 and contains no NUL before removing those lines from the staged /etc/rc. Preserve trailing whitespace through Podman import and retain startup, default command, argument forwarding, and rc.local handling. | Check the stored and runtime directory for a path with a trailing space and verify a runtime workdir override. With zero or multiple pairs, reject by default. The explicit rc override preserves the script byte for byte and warns. |
+| Select /bin/bash for rc if it resolves to a regular file with execute bits in the image. Otherwise try /usr/bin/bash. Preserve the empty image Cmd. | Cover the /usr/bin/bash-only layout, a non-executable /bin/bash, and the absence of executable Bash. Verify the /bin/sh fallback when rc is absent. |
+| Parse Enroot assignments and one-pass host substitutions as data. Preserve quoting rules, literal characters, and last-assignment-wins behavior. Filter reserved names and warn on malformed assignments. Reject invalid UTF-8 in assignments retained for image metadata. | Cover dynamic names, skipped assignments clearing earlier values, later static assignments restoring them, unset host values, and rejection of CR/LF and invalid UTF-8. Test explicit policies, a single controlling-terminal prompt with default omission, and unattended failure before import. |
 | Recover the source label from the first provenance marker and warn about active fstab mounts. Stream one flattened GNU tar layer with POSIX format, numeric ownership, ACLs, and xattrs. | Inspect metadata and capture import arguments individually. Verify the staged script, filesystem contents, and mount warning. |
 
-- [ ] Implement the streaming pipeline with `std::process::Command`, using individual arguments for each import change. Connect tar stdout to Podman stdin, reap both children, and propagate the rightmost failing status. Cover tar and Podman failures, including failure to start the consumer. The pinned Podman driver provides `rmi` for cleanup and lacks a streaming image-import method. [Podman driver API](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/podman-driver/src/lib.rs)
-- [ ] **Acceptance:** Run the eight Bash mock cases as a reference and reuse their captured-argument, staged-script, terminal, and status assertions at the Rust staging boundary. The mock suite hard-codes Bash and its Podman stub produces no real image. Exercise this boundary in tests while keeping publication mandatory in the production CLI. [Mock suite](tests/converter-mocks.bats), [terminal helper](tests/terminal.bash)
+- [x] Implement the streaming pipeline with `std::process::Command`, using individual arguments for each import change. Connect tar stdout to Podman stdin, reap both children, and propagate the rightmost failing status. Cover tar and Podman failures, including failure to start the consumer. The pinned Podman driver provides `rmi` for cleanup and lacks a streaming image-import method. [Podman driver API](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/podman-driver/src/lib.rs)
+- [x] **Acceptance:** Run the eight Bash mock cases as a reference and reuse their captured-argument, staged-script, terminal, and status assertions at the Rust staging boundary. Select the Rust test driver with `ENROOT_CONVERTER`. The test driver exercises Podman staging, and stage three connects it to mandatory CAS publication in the production CLI. [Mock suite](tests/converter-mocks.bats), [terminal helper](tests/terminal.bash)
+
+### Stage 2 runner setup
+
+Run the mock suites on Linux with Bats 1.11 or later, GNU tar, and
+`script` and `setsid` from util-linux. For the real-image suites, use
+rootless Podman and the fixture tools in the devcontainer. The test driver
+takes a test-owned local stage tag, which the real-image suite removes.
+
+```sh
+cargo build --locked --example stage-two-driver
+bats --print-output-on-failure tests/converter-mocks.bats
+export ENROOT_CONVERTER="$PWD/target/debug/examples/stage-two-driver"
+bats --print-output-on-failure tests/converter-mocks.bats tests/stage-two.bats
+bats --print-output-on-failure \
+  tests/enroot-to-oci.bats tests/stage-two-rootless.bats tests/filesystem-fidelity.bats
+```
+
+On 2026-11-25, 21 real-image cases passed as `vscode` with Podman 5.4.2
+using an isolated rootless overlay store. The ACL case skipped because the
+fixture ACL was unavailable after extraction. The device-node case skipped
+because the runner could not create the fixture device.
 
 ## 3. Publish the staged image to the CAS
 

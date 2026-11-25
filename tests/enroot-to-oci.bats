@@ -80,7 +80,7 @@ ENV
     trace_import
     run --separate-stderr convert --skip-dynamic-env --resolve-host-env
     [ "$status" -eq 2 ]
-    [[ $stderr == *'mutually exclusive'* ]]
+    [[ $stderr == *'--skip-dynamic-env'* && $stderr == *'--resolve-host-env'* ]]
     [ ! -e "$IMPORT_TRACE" ]
 }
 

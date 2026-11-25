@@ -1,3 +1,7 @@
+mod staging;
+
+pub use staging::{HostEnvPolicy, StageError, StageOptions, stage_image};
+
 use hpc_image_store::{StoreConfig, TransferContext};
 use raster::config::VarExpand;
 use std::path::{Path, PathBuf};

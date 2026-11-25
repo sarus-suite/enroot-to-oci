@@ -9,6 +9,8 @@ run_with_terminal() {
         eof) response=$'\x04' ;;
         no) response=$'n\n' ;;
         yes) response=$'y\n' ;;
+        uppercase_yes) response=$'Y\n' ;;
+        repeated_yes) response=$'yy\n' ;;
         *) printf 'Unknown terminal reply: %s\n' "$reply" >&2; return 2 ;;
     esac
 
