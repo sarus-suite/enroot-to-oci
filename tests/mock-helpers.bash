@@ -1,4 +1,5 @@
 load terminal
+load converter-executable
 
 setup_file() {
     bats_require_minimum_version 1.11.0
@@ -7,8 +8,8 @@ setup_file() {
 setup() {
     export LC_ALL=C.UTF-8
     unset BASH_ENV ENV CDPATH MISSING MOCK_IMPORT_STATUS SOME_HOST DYNAMIC_KEY name IGNORED
-    unset MOCK_TAR_STATUS MOCK_TAR_BLOCK MOCK_TAR_SIGNAL LATER
-    converter=(bash "$BATS_TEST_DIRNAME/../enroot-to-oci.sh")
+    unset MOCK_TAR_STATUS MOCK_TAR_BLOCK MOCK_TAR_SIGNAL MOCK_PODMAN_DISAPPEARS LATER
+    find_converter "$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     sqsh="$BATS_TEST_TMPDIR/fixture image.sqsh"
     tag=localhost/example:tag
     terminal_log="$BATS_TEST_TMPDIR/terminal"
@@ -42,35 +43,63 @@ while (($#)); do
 done
 exit 2
 SH
-    cat > "$bin/podman" <<'SH'
+    configured_podman="$BATS_TEST_TMPDIR/configured podman"
+    cat > "$configured_podman" <<'SH'
 #!/usr/bin/env bash
 set -e
-printf '%s\0' "$@" > "$CAPTURE.args"
-cat > "$CAPTURE.tar"
-exit "${MOCK_IMPORT_STATUS:-0}"
+state="$BATS_TEST_TMPDIR/podman-tag"
+case "$1 $2" in
+    'image exists')
+        [[ $3 == -- ]] || exit 98
+        if [[ ${MOCK_PODMAN_DISAPPEARS:-} == 1 ]]; then
+            mv -- "$0" "$0.disabled"
+            exit 1
+        fi
+        [[ -f $state && $4 == "$(cat "$state")" ]]
+        ;;
+    'import --change')
+        printf '%s\0' "$@" > "$CAPTURE.args"
+        cat > "$CAPTURE.tar"
+        if [[ ${MOCK_IMPORT_STATUS:-0} == 0 ]]; then
+            printf '%s\n' "${@: -1}" > "$state"
+        fi
+        exit "${MOCK_IMPORT_STATUS:-0}"
+        ;;
+    'image rm')
+        [[ $3 == --ignore && $4 == --no-prune && $5 == -- ]] || exit 98
+        if [[ -e $state ]]; then
+            [[ $6 == "$(cat "$state")" ]] || exit 98
+            unlink "$state"
+        fi
+        ;;
+    *)
+        exit 98
+        ;;
+esac
 SH
-    chmod +x "$bin"/{unsquashfs,podman}
-    if [[ -n ${ENROOT_CONVERTER:-} ]]; then
-        local executable
-        executable=$(command -v -- "$ENROOT_CONVERTER") && [[ -x $executable ]] || {
-            echo "ENROOT_CONVERTER must name an executable: $ENROOT_CONVERTER" >&2
-            return 1
-        }
-        export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/config" XDG_CONFIG_DIRS="$BATS_TEST_TMPDIR/config"
-        configured_podman="$BATS_TEST_TMPDIR/configured podman"
-        mkdir -p "$XDG_CONFIG_HOME/sarus-suite"
-        printf "podman_path = '%s'\n" "$configured_podman" > "$XDG_CONFIG_HOME/sarus-suite/stage-two.conf"
-        mv "$bin/podman" "$configured_podman"
-        printf '#!/bin/sh\nexit 98\n' > "$bin/podman"
-        chmod +x "$bin/podman"
-        converter=("$executable" --store "$BATS_TEST_TMPDIR/unused-store")
-    fi
+    cat > "$BATS_TEST_TMPDIR/configured skopeo" <<'SH'
+#!/usr/bin/env bash
+[[ $1 == copy && $2 == --help && -s $BATS_TEST_TMPDIR/podman-tag ]] || exit 98
+echo 'stopping publication after capturing Podman import' >&2
+exit 97
+SH
+    export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/config" XDG_CONFIG_DIRS="$BATS_TEST_TMPDIR/config"
+    mkdir -p "$XDG_CONFIG_HOME/sarus-suite"
+    cat > "$XDG_CONFIG_HOME/sarus-suite/test.conf" <<'CONFIG'
+hpc_image_store = '${BATS_TEST_TMPDIR}/cas'
+podman_path = '${BATS_TEST_TMPDIR}/configured podman'
+skopeo_path = '${BATS_TEST_TMPDIR}/configured skopeo'
+CONFIG
+    printf '#!/bin/sh\nexit 98\n' > "$bin/podman"
+    sync -- "${BATS_RUN_TMPDIR%/*}" "$BATS_RUN_TMPDIR" "${BATS_TEST_TMPDIR%/*}" "$BATS_TEST_TMPDIR"
+    chmod +x "$bin"/{unsquashfs,podman} "$configured_podman" "$BATS_TEST_TMPDIR/configured skopeo"
     export PATH="$bin:$PATH"
 }
 
 teardown() {
     cmp "$BATS_TEST_TMPDIR/original-rc" "$FIXTURE/etc/rc"
     [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ]
+    [ ! -e "$BATS_TEST_TMPDIR/podman-tag" ]
 }
 
 convert() {
@@ -83,7 +112,7 @@ assert_import() {
     mapfile -d '' -t args < "$CAPTURE.args"
     [ "${args[0]}" = import ]
     [ "${args[-2]}" = - ]
-    [ "${args[-1]}" = "$tag" ]
+    [[ ${args[-1]} =~ ^localhost/enroot-to-oci-stage:[[:xdigit:]]{32}$ ]]
     for ((i=1; i<${#args[@]}-2; i+=2)); do
         [ "${args[i]}" = --change ] || return 1
         change=${args[i+1]}
@@ -110,5 +139,12 @@ assert_quiet_host_policy() {
 }
 
 assert_no_import() {
-    [ ! -e "$CAPTURE.args" ] && [ ! -e "$CAPTURE.tar" ]
+    [ ! -e "$CAPTURE.args" ] && [ ! -e "$CAPTURE.tar" ] && [ -z "$output" ]
+}
+
+assert_publication_stopped() {
+    [ "$status" -eq 1 ] &&
+        [[ $stderr == *'stopping publication after capturing Podman import'* ]] &&
+        [ -z "$output" ] &&
+        [ ! -e "$BATS_TEST_TMPDIR/podman-tag" ]
 }

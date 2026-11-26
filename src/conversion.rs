@@ -1,12 +1,12 @@
-use crate::{
-    StageError, StageOptions, load_transfer_settings,
-    staging::{import_rootfs, with_prepared_rootfs},
+use crate::staging::{StageError, StageOptions, import_rootfs, with_prepared_rootfs};
+use hpc_image_store::{
+    ImageSelector, ImportOptions, ImportReport, Store, StoreConfig, TransferContext,
 };
-use hpc_image_store::{ImageSelector, ImportOptions, ImportReport, Store};
+use raster::config::VarExpand;
 use std::{
     error::Error,
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
@@ -88,6 +88,31 @@ pub fn convert_image(
         remove_staging_tag(&context.podman, &tag);
     }
     result
+}
+
+fn load_transfer_settings(
+    store_override: Option<&Path>,
+) -> Result<(StoreConfig, TransferContext), String> {
+    let config = raster::load_config_xdg(VarExpand::Must, &None)
+        .map_err(|error| format!("Cannot load Sarus configuration: {error}"))?;
+
+    let store_path = match store_override {
+        Some(path) => path.to_path_buf(),
+        None if config.hpc_image_store.is_empty() => {
+            return Err(
+                "Set hpc_image_store in the Sarus configuration or supply --store PATH".into(),
+            );
+        }
+        None => PathBuf::from(config.hpc_image_store),
+    };
+
+    let store = StoreConfig::new(store_path).map_err(|error| error.to_string())?;
+    let context = TransferContext {
+        podman: config.podman_path.into(),
+        skopeo: config.skopeo_path.into(),
+        ..TransferContext::default()
+    };
+    Ok((store, context))
 }
 
 fn allocate_staging_tag(podman: &Path, destination: &ImageSelector) -> Result<String, StageError> {

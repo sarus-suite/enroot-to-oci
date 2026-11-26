@@ -13,5 +13,5 @@ raster = { git = "https://github.com/sarus-suite/cluster-tooling", rev = "49c6f2
 tempfile = "3"
 
 [[example]]
-name = "stage-two-driver"
-path = "tests/support/stage-two-driver.rs"
+name = "cas-round-trip"
+path = "tests/support/cas-round-trip.rs"

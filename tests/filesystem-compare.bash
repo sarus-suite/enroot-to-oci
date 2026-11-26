@@ -7,9 +7,8 @@ fi
 
 source_tree=$1
 owners_file=$2
-rootless=$3
-expected_rc=$4
-imported_tree=$5
+expected_rc=$3
+restored_tree=$4
 paths=${owners_file%/*}
 
 fail() {
@@ -22,8 +21,8 @@ list_paths() {
 }
 
 list_paths "$source_tree" > "$paths/source-paths"
-list_paths "$imported_tree" > "$paths/imported-paths"
-cmp "$paths/source-paths" "$paths/imported-paths" || fail 'Image paths differ from fixture paths'
+list_paths "$restored_tree" > "$paths/restored-paths"
+cmp "$paths/source-paths" "$paths/restored-paths" || fail 'Image paths differ from fixture paths'
 
 declare -A extracted_owners=() source_inodes=() image_inodes=() ownership_losses=()
 while IFS= read -r -d '' relative && IFS= read -r -d '' owner; do
@@ -32,7 +31,7 @@ done < "$owners_file"
 
 while IFS= read -r -d '' relative; do
     before=$source_tree/$relative
-    after=$imported_tree/$relative
+    after=$restored_tree/$relative
     before_metadata=$(stat -c '%f %d:%i' -- "$before")
     after_metadata=$(stat -c '%f %d:%i %u:%g' -- "$after")
     read -r before_mode before_inode <<< "$before_metadata"
@@ -43,9 +42,9 @@ while IFS= read -r -d '' relative; do
     if [[ $relative == payload/owned ]]; then expected_owner=1234:2345; fi
     if [[ $after_owner != "$expected_owner" ]]; then
         baseline=${extracted_owners[$relative]-unavailable}
-        [[ $rootless == true && $after_owner == "$baseline" ]] ||
+        [[ $after_owner == "$baseline" ]] ||
             fail "$relative: expected $expected_owner, got $after_owner (unprivileged extraction: $baseline)"
-        ownership_losses["$expected_owner, imported $after_owner"]=1
+        ownership_losses["$expected_owner, restored $after_owner"]=1
     fi
 
     if [[ -L $before ]]; then

@@ -8,11 +8,11 @@ pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 pub const XDG_CONFIG_VARIABLES: [(&str, &str); 2] = [
     (
         "XDG_CONFIG_HOME",
-        "ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_HOME",
+        "ENROOT_TO_OCI_TEST_CALLER_XDG_CONFIG_HOME",
     ),
     (
         "XDG_CONFIG_DIRS",
-        "ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_DIRS",
+        "ENROOT_TO_OCI_TEST_CALLER_XDG_CONFIG_DIRS",
     ),
 ];
 

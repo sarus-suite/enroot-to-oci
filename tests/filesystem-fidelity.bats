@@ -6,11 +6,7 @@ load helpers
 with_image() {
     local image=$1
     shift
-    local -a engine=()
-    if [[ $PODMAN_ROOTLESS == true ]]; then
-        engine=("$PODMAN_BIN" unshare)
-    fi
-    timeout --kill-after=5 30 "${engine[@]}" bash -c '
+    timeout --kill-after=5 30 "$PODMAN_BIN" unshare bash -c '
         set -eu
         image=$1
         shift
@@ -22,8 +18,7 @@ with_image() {
 }
 
 extract_source() {
-    extracted="$BATS_TEST_TMPDIR/source"
-    unsquashfs -no-progress -processors 1 -dest "$extracted" "$sqsh"
+    unsquashfs -no-progress -processors 1 -dest "$1" "$sqsh"
 }
 
 @test "matches file contents, modes, links and FIFOs and checks numeric ownership" {
@@ -36,7 +31,8 @@ extract_source() {
     ln -s data "$source_tree/payload/symlink"
     mkfifo -m 0620 "$source_tree/payload/fifo"
     pack_rootfs -pseudo-override -p '/payload/owned m 0640 1234 2345'
-    extract_source
+    local extracted="$BATS_TEST_TMPDIR/source"
+    extract_source "$extracted"
     local listing checksum owners="$BATS_TEST_TMPDIR/source-owners"
     local expected_rc="$BATS_TEST_TMPDIR/expected-rc"
     listing=$(unsquashfs -lln "$sqsh")
@@ -51,12 +47,13 @@ extract_source() {
     grep -Fxv -e "$mkdir_line" -e "$cd_line" "$source_tree/etc/rc" > "$expected_rc"
 
     checksum=$(sha256sum "$sqsh")
-    run --separate-stderr convert
+    run --separate-stderr --keep-empty-lines convert
     [ "$status" -eq 0 ]
+    restore_image
     sha256sum --check <<< "$checksum"
 
-    run with_image "$tag" bash "$BATS_TEST_DIRNAME/filesystem-compare.bash" \
-        "$source_tree" "$owners" "$PODMAN_ROOTLESS" "$expected_rc"
+    run with_image "$restored_tag" bash "$BATS_TEST_DIRNAME/filesystem-compare.bash" \
+        "$source_tree" "$owners" "$expected_rc"
     [ "$status" -eq 0 ]
     if [[ -n $output ]]; then
         while IFS= read -r line; do printf '# %s\n' "$line"; done <<< "$output" >&3
@@ -87,9 +84,15 @@ read_metadata() {
 
 assert_metadata() {
     local feature=$1 expected
+    local extracted="$BATS_TEST_TMPDIR/source"
     export -f read_metadata
     pack_rootfs
-    extract_source
+    run --separate-stderr extract_source "$extracted"
+    if [[ $feature == device && $status -ne 0 && $stderr == *payload* &&
+        ( $stderr == *'Operation not permitted'* || $stderr == *'Permission denied'* ) ]]; then
+        skip "Unprivileged SquashFS extraction cannot create the fixture device node"
+    fi
+    [ "$status" -eq 0 ]
     expected=$(read_metadata "$feature" "$source_tree")
     run read_metadata "$feature" "$extracted"
     if [[ $status -eq 77 || ( $status -eq 0 && $output != "$expected" ) ]]; then
@@ -112,9 +115,10 @@ assert_metadata() {
     fi
     [ "$status" -eq 0 ]
 
-    run --separate-stderr convert
+    run --separate-stderr --keep-empty-lines convert
     [ "$status" -eq 0 ]
-    run with_image "$tag" bash -c 'read_metadata "$@"' bash "$feature"
+    restore_image
+    run with_image "$restored_tag" bash -c 'read_metadata "$@"' bash "$feature"
     [ "$status" -eq 0 ]
     [ "$output" = "$expected" ]
 }

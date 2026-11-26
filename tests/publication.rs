@@ -43,33 +43,6 @@ fn converter(directory: &Path, tools: &Path, destination: &str) -> Command {
 }
 
 #[test]
-fn rejects_digest_only_destination_before_staging() -> TestResult {
-    let temporary = tempfile::tempdir()?;
-    let directory = std::path::absolute(temporary.path())?;
-    let tools = executable_fixture_dir()?;
-    prepare_config(&directory)?;
-    File::create(directory.join("fixture image.sqsh"))?;
-    for tool in ["unsquashfs", "configured-podman", "configured-skopeo"] {
-        write_executable(
-            &tools.path().join(tool),
-            "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$ENROOT_TEST_DIRECTORY/tool-log\"\nexit 42\n",
-        )?;
-    }
-
-    let destination = format!("localhost/test@sha256:{}", "a".repeat(64));
-    let output = converter(&directory, tools.path(), &destination)
-        .env("PATH", tools.path())
-        .output()?;
-    let stderr = assert_failed(&output, 2, "requires an explicit tag")?;
-    assert!(stderr.starts_with("error:"), "{stderr}");
-    assert!(stderr.contains(&destination), "{stderr}");
-    assert!(!directory.join("tool-log").exists());
-    assert!(!directory.join("store").exists());
-    assert!(fs::read_dir(directory.join("staging"))?.next().is_none());
-    Ok(())
-}
-
-#[test]
 fn staging_failure_cleans_up_without_publishing() -> TestResult {
     let temporary = tempfile::tempdir()?;
     let directory = std::path::absolute(temporary.path())?;
@@ -151,7 +124,6 @@ esac
 }
 
 #[test]
-#[ignore = "requires local rootless Podman and Skopeo and squashfs-tools"]
 fn rootless_publication() -> TestResult {
     let rootless =
         run(Command::new("podman").args(["info", "--format", "{{.Host.Security.Rootless}}"]))?;
@@ -171,9 +143,11 @@ fn rootless_publication() -> TestResult {
     File::open(directory.parent().unwrap())?.sync_all()?;
     File::open(&directory)?.sync_all()?;
     let store = Store::new(StoreConfig::new(directory.join("store"))?);
+    let override_path = directory.join("override-store");
+    let override_store = Store::new(StoreConfig::new(&override_path)?);
     let rootfs = directory.join("rootfs");
     fs::create_dir(&rootfs)?;
-    fs::write(rootfs.join("fixture.txt"), "Stage 3 publication fixture\n")?;
+    fs::write(rootfs.join("fixture.txt"), "CAS publication fixture\n")?;
     run(Command::new("mksquashfs")
         .arg(&rootfs)
         .arg(directory.join("fixture image.sqsh"))
@@ -188,7 +162,7 @@ fn rootless_publication() -> TestResult {
         .arg("."))?;
 
     let prefix = format!(
-        "localhost/enroot-to-oci-stage-three:{}",
+        "localhost/enroot-to-oci-publication:{}",
         directory.file_name().unwrap().to_str().unwrap()
     );
     let destination = format!("{prefix}-published");
@@ -238,6 +212,22 @@ exec skopeo "$@"
     let stderr = std::str::from_utf8(&output.stderr)?;
     assert!(!stderr.contains("Ignored destination digest"), "{stderr}");
     assert!(!image_exists(&fixtures.latest_staging_tag()?)?);
+
+    let override_destination = format!("{prefix}-override");
+    let output = converter(&directory, tools.path(), &override_destination)
+        .arg("--store")
+        .arg(&override_path)
+        .output()?;
+    assert_published(&override_store, &override_destination, &output)?;
+    assert!(!image_exists(&fixtures.latest_staging_tag()?)?);
+    assert_eq!(
+        store.resolve(&ImageSelector::new(&override_destination)?)?,
+        None
+    );
+    assert_eq!(
+        override_store.resolve(&ImageSelector::new(&destination)?)?,
+        None
+    );
 
     let failed_destination = format!("{prefix}-copy-failure");
     let output = converter(&directory, tools.path(), &failed_destination)
@@ -289,8 +279,8 @@ exec skopeo "$@"
     assert!(image_exists(&surviving_tag)?);
 
     let log = fs::read_to_string(&fixtures.staging_log)?;
-    assert_eq!(log.lines().count(), 4);
-    assert_eq!(log.lines().collect::<HashSet<_>>().len(), 4);
+    assert_eq!(log.lines().count(), 5);
+    assert_eq!(log.lines().collect::<HashSet<_>>().len(), 5);
     assert_eq!(image_id(&destination)?, destination_id);
     assert_eq!(image_id(&unrelated)?, unrelated_id);
     assert!(fs::read_dir(directory.join("staging"))?.next().is_none());

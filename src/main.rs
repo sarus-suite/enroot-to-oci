@@ -9,11 +9,11 @@ use std::{path::PathBuf, process::ExitCode};
     about = "Convert Enroot Squashfs images and import them into a Sarus Suite OCI store"
 )]
 struct Cli {
-    /// Select the CAS directory with --store PATH or --store=PATH
+    /// Destination CAS directory
     #[arg(long, value_name = "PATH")]
     store: Option<PathBuf>,
 
-    /// Omit assignments that use Enroot host substitutions
+    /// Omit assignments that use Enroot host substitutions. Conflicts with --resolve-host-env
     #[arg(
         long,
         conflicts_with = "resolve_host_env",
@@ -21,7 +21,7 @@ struct Cli {
     )]
     skip_dynamic_env: bool,
 
-    /// Expand host substitutions into the image metadata
+    /// Expand host substitutions into the image metadata. Conflicts with --skip-dynamic-env
     #[arg(long, overrides_with = "resolve_host_env")]
     resolve_host_env: bool,
 
@@ -33,8 +33,8 @@ struct Cli {
     #[arg(value_name = "IMAGE.sqsh")]
     image: PathBuf,
 
-    /// Requested CAS destination with an explicit tag
-    #[arg(value_name = "IMAGE_TAG", value_parser = parse_destination)]
+    /// Destination image reference with an explicit tag
+    #[arg(value_name = "IMAGE_REF", value_parser = parse_destination)]
     destination: ImageSelector,
 }
 

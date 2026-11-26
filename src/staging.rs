@@ -66,23 +66,6 @@ impl fmt::Display for StageError {
 
 impl Error for StageError {}
 
-/// Extract an Enroot image and import its root filesystem into local Podman storage.
-///
-/// The caller supplies and manages an owned staging tag. An import can create the
-/// tag before a failure in the pipeline is detected.
-///
-/// Only used by test drivers and helpers. Candidate for removal when consolidating around production code.
-pub fn stage_image(
-    image: &Path,
-    podman_path: &Path,
-    staging_tag: &str,
-    options: StageOptions,
-) -> Result<(), StageError> {
-    with_prepared_rootfs(image, options, |rootfs, changes| {
-        import_rootfs(rootfs, podman_path, staging_tag, changes)
-    })
-}
-
 /// Run an `import` callback function with a prepared image rootfs and its Podman import arguments.
 ///
 /// In the context of this function, "prepared" means that the rootfs is ready for

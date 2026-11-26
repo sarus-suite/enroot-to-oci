@@ -1,11 +1,7 @@
 mod support;
 
-use enroot_to_oci::load_transfer_settings;
-use hpc_image_store::{ImageSelector, ImportOptions, ImportReport, Store, TransferContext};
 use std::{
-    env,
     ffi::OsString,
-    fs::{self, File},
     path::Path,
     process::{Command, Output},
 };
@@ -42,15 +38,13 @@ fn help_and_usage_errors_precede_configuration() -> TestResult {
             "{args:?}: {stdout}"
         );
         assert!(stdout.contains("--resolve-host-env"), "{args:?}: {stdout}");
-        assert!(
-            stdout.contains("--store PATH or --store=PATH"),
-            "{args:?}: {stdout}"
-        );
+        assert!(stdout.contains("--store"), "{args:?}: {stdout}");
     }
 
+    let digest_only = format!("example@sha256:{}", "a".repeat(64));
     let invalid_cases: &[(&[&str], &str)] = &[
         (&[], "<IMAGE.sqsh>"),
-        (&["source.sqsh"], "<IMAGE_TAG>"),
+        (&["source.sqsh"], "<IMAGE_REF>"),
         (&["source.sqsh", "example:tag", "extra"], "extra"),
         (&["--unknown", "source.sqsh", "example:tag"], "--unknown"),
         (&["--store"], "--store"),
@@ -87,8 +81,9 @@ fn help_and_usage_errors_precede_configuration() -> TestResult {
             ],
             "--resolve-host-env",
         ),
-        (&["source.sqsh", "example"], "<IMAGE_TAG>"),
-        (&["source.sqsh", "invalid tag"], "<IMAGE_TAG>"),
+        (&["source.sqsh", "example"], "<IMAGE_REF>"),
+        (&["source.sqsh", "invalid tag"], "<IMAGE_REF>"),
+        (&["source.sqsh", &digest_only], "requires an explicit tag"),
     ];
     for (args, expected_diagnostic) in invalid_cases {
         let output = converter(xdg.path(), args)?;
@@ -200,9 +195,6 @@ fn missing_configured_store_has_an_actionable_error() -> TestResult {
     Ok(())
 }
 
-const SMOKE_ROOT: &str = "ENROOT_TO_OCI_SMOKE_ROOT";
-const SMOKE_TOOLS_DIR: &str = "ENROOT_TO_OCI_SMOKE_TOOLS_DIR";
-
 #[test]
 fn tool_wrappers_restore_caller_xdg() -> TestResult {
     let temporary = executable_fixture_dir()?;
@@ -212,7 +204,7 @@ fn tool_wrappers_restore_caller_xdg() -> TestResult {
     let stub = r#"#!/bin/sh
 printf '%s\0' "${XDG_CONFIG_HOME+x}" "${XDG_CONFIG_HOME-}" \
     "${XDG_CONFIG_DIRS+x}" "${XDG_CONFIG_DIRS-}" \
-    "${ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_HOME+x}" "${ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_DIRS+x}" \
+    "${ENROOT_TO_OCI_TEST_CALLER_XDG_CONFIG_HOME+x}" "${ENROOT_TO_OCI_TEST_CALLER_XDG_CONFIG_DIRS+x}" \
     "$CONTAINERS_STORAGE_CONF" "$@"
 "#;
 
@@ -271,165 +263,4 @@ printf '%s\0' "${XDG_CONFIG_HOME+x}" "${XDG_CONFIG_HOME-}" \
         }
     }
     Ok(())
-}
-
-#[test]
-#[ignore = "requires local rootless Podman and Skopeo"]
-fn rootless_store_smoke() -> TestResult {
-    if let Some(directory) = env::var_os(SMOKE_ROOT) {
-        let tools_dir = env::var_os(SMOKE_TOOLS_DIR)
-            .ok_or("Missing tool directory for the smoke test child")?;
-        return exercise_store(Path::new(&directory), Path::new(&tools_dir));
-    }
-
-    let temporary = tempfile::Builder::new().prefix("enroot-cas-").tempdir()?;
-    let tools = executable_fixture_dir()?;
-    let directory = std::path::absolute(temporary.path())?;
-    let xdg = directory.join("xdg");
-    write_sarus_config(
-        &xdg,
-        "hpc_image_store = '${ENROOT_TO_OCI_SMOKE_ROOT}/configured-store'\n\
-         podman_path = '${ENROOT_TO_OCI_SMOKE_TOOLS_DIR}/configured-podman'\n\
-         skopeo_path = '${ENROOT_TO_OCI_SMOKE_TOOLS_DIR}/configured-skopeo'\n",
-    )?;
-    for tool in ["podman", "skopeo"] {
-        let configured_tool = tools.path().join(format!("configured-{tool}"));
-        write_tool_wrapper(&configured_tool, &format!("exec {tool} \"$@\"\n"))?;
-    }
-    // Persist the store parent's directory entry before either import initializes a store.
-    File::open(directory.parent().unwrap())?.sync_all()?;
-    File::open(&directory)?.sync_all()?;
-
-    // Raster reads the fixture configuration. The wrappers restore the caller's XDG values.
-    let mut child = Command::new(env::current_exe()?);
-    set_fixture_xdg(
-        &mut child,
-        &xdg,
-        XDG_CONFIG_VARIABLES.map(|(name, _)| env::var_os(name)),
-    );
-    let report = run(child
-        .env(SMOKE_ROOT, &directory)
-        .env(SMOKE_TOOLS_DIR, tools.path())
-        .args([
-            "--ignored",
-            "--exact",
-            "rootless_store_smoke",
-            "--nocapture",
-        ]))?;
-    print!("{report}");
-    temporary.close()?;
-    tools.close()?;
-    Ok(())
-}
-
-fn exercise_store(directory: &Path, tools_dir: &Path) -> TestResult {
-    let override_path = directory.join("override-store");
-    let (configured, context) = load_transfer_settings(None)?;
-    let (overridden, override_context) = load_transfer_settings(Some(&override_path))?;
-    assert_eq!(configured.root(), directory.join("configured-store"));
-    assert_eq!(overridden.root(), override_path);
-    assert_eq!(context.podman, tools_dir.join("configured-podman"));
-    assert_eq!(context.skopeo, tools_dir.join("configured-skopeo"));
-    assert_eq!(override_context.podman, context.podman);
-    assert_eq!(override_context.skopeo, context.skopeo);
-
-    let rootless = run(Command::new(&context.podman).args([
-        "info",
-        "--format",
-        "{{.Host.Security.Rootless}}",
-    ]))?;
-    assert_eq!(
-        rootless.trim(),
-        "true",
-        "This test requires rootless Podman"
-    );
-
-    let rootfs = directory.join("rootfs");
-    fs::create_dir(&rootfs)?;
-    fs::write(rootfs.join("fixture.txt"), "Stage 1 CAS fixture\n")?;
-    let archive = directory.join("fixture.tar");
-    run(Command::new("tar")
-        .arg("-C")
-        .arg(&rootfs)
-        .arg("-cf")
-        .arg(&archive)
-        .arg("."))?;
-
-    let configured = Store::new(configured);
-    let overridden = Store::new(overridden);
-    let source = ImageSelector::new(format!(
-        "localhost/enroot-to-oci-smoke:{}",
-        directory.file_name().unwrap().to_str().unwrap()
-    ))?;
-    let configured_destination = ImageSelector::new("stage-one/fixture:configured")?;
-    let override_destination = ImageSelector::new("stage-one/fixture:override")?;
-    assert!(
-        !fixture_tag_exists(&context, &source)?,
-        "Fixture tag already exists: {source}"
-    );
-
-    let imports = (|| -> TestResult<_> {
-        run(Command::new(&context.podman)
-            .arg("import")
-            .arg(&archive)
-            .arg(source.as_str()))?;
-        let options = ImportOptions::default();
-        let configured_report =
-            configured.import(&source, Some(&configured_destination), &context, &options)?;
-        let override_report = overridden.import(
-            &source,
-            Some(&override_destination),
-            &override_context,
-            &options,
-        )?;
-        Ok((configured_report, override_report))
-    })();
-    let cleanup = remove_fixture_tag(&context, &source);
-    if let Err(error) = &cleanup {
-        eprintln!("Cannot clean up Podman fixture {source}: {error}");
-    }
-    let (configured_report, override_report) = imports?;
-    cleanup?;
-
-    assert_resolved(&configured, &configured_destination, &configured_report)?;
-    assert_resolved(&overridden, &override_destination, &override_report)?;
-    assert_eq!(configured.resolve(&override_destination)?, None);
-    assert_eq!(overridden.resolve(&configured_destination)?, None);
-    Ok(())
-}
-
-fn assert_resolved(
-    store: &Store,
-    destination: &ImageSelector,
-    report: &ImportReport,
-) -> TestResult {
-    assert_eq!(report.local_ref.as_str(), destination.as_str());
-    let expected = format!("{}@{}", destination.name(), report.stored_root);
-    assert_eq!(
-        store.resolve(destination)?.as_deref(),
-        Some(expected.as_str())
-    );
-    println!(
-        "{destination} resolved to {expected} in {}",
-        store.config().root().display()
-    );
-    Ok(())
-}
-
-fn remove_fixture_tag(context: &TransferContext, source: &ImageSelector) -> TestResult {
-    if fixture_tag_exists(context, source)? {
-        run(Command::new(&context.podman).args(["image", "rm", "--", source.as_str()]))?;
-    }
-    Ok(())
-}
-
-fn fixture_tag_exists(context: &TransferContext, source: &ImageSelector) -> TestResult<bool> {
-    let status = Command::new(&context.podman)
-        .args(["image", "exists", source.as_str()])
-        .status()?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(format!("Podman image exists {source} failed ({status})").into()),
-    }
 }
