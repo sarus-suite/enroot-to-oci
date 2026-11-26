@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
 hpc-image-store = { git = "https://github.com/sarus-suite/cluster-tooling", rev = "49c6f24716e08bc16b5e31cf8779cb957afc411d" }
 libc = "0.2"
 raster = { git = "https://github.com/sarus-suite/cluster-tooling", rev = "49c6f24716e08bc16b5e31cf8779cb957afc411d" }

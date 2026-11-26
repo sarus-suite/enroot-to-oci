@@ -1,26 +1,22 @@
+mod support;
+
 use enroot_to_oci::load_transfer_settings;
 use hpc_image_store::{ImageSelector, ImportOptions, ImportReport, Store, TransferContext};
 use std::{
     env,
-    error::Error,
     ffi::OsString,
     fs::{self, File},
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
-
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
-
-fn write_sarus_config(xdg: &Path, contents: &str) -> TestResult {
-    let config_dir = xdg.join("sarus-suite");
-    fs::create_dir_all(&config_dir)?;
-    fs::write(config_dir.join("stage-one.conf"), contents)?;
-    Ok(())
-}
+use support::{
+    TestResult, XDG_CONFIG_VARIABLES, executable_fixture_dir, run, set_fixture_xdg,
+    write_executable, write_sarus_config, write_tool_wrapper,
+};
 
 fn converter(xdg: &Path, args: &[&str]) -> TestResult<Output> {
     Ok(Command::new(env!("CARGO_BIN_EXE_enroot-to-oci"))
+        .current_dir(xdg)
         .env("XDG_CONFIG_HOME", xdg)
         .env("XDG_CONFIG_DIRS", xdg)
         .args(args)
@@ -133,9 +129,7 @@ fn accepts_end_of_options_and_digest_qualified_destination() -> TestResult {
         let stderr = std::str::from_utf8(&output.stderr)?;
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(
-            stderr.contains(&format!(
-                "SquashFS conversion is pending: {image} to {destination}"
-            )),
+            stderr.contains(&format!("Cannot resolve {image}:")),
             "{stderr}"
         );
     }
@@ -162,7 +156,7 @@ fn accepts_both_store_spellings_around_operands() -> TestResult {
         let stderr = std::str::from_utf8(&output.stderr)?;
         assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
         assert!(
-            stderr.contains("SquashFS conversion is pending: source.sqsh to example:tag"),
+            stderr.contains("Cannot resolve source.sqsh:"),
             "{args:?}: {stderr}"
         );
     }
@@ -208,62 +202,6 @@ fn missing_configured_store_has_an_actionable_error() -> TestResult {
 
 const SMOKE_ROOT: &str = "ENROOT_TO_OCI_SMOKE_ROOT";
 const SMOKE_TOOLS_DIR: &str = "ENROOT_TO_OCI_SMOKE_TOOLS_DIR";
-const XDG_CONFIG_VARIABLES: [(&str, &str); 2] = [
-    (
-        "XDG_CONFIG_HOME",
-        "ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_HOME",
-    ),
-    (
-        "XDG_CONFIG_DIRS",
-        "ENROOT_TO_OCI_SMOKE_CALLER_XDG_CONFIG_DIRS",
-    ),
-];
-
-fn set_fixture_xdg(
-    command: &mut Command,
-    fixture_xdg: &Path,
-    caller_values: [Option<OsString>; 2],
-) {
-    for ((name, backup), value) in XDG_CONFIG_VARIABLES.into_iter().zip(caller_values) {
-        command.env(name, fixture_xdg);
-        match value {
-            Some(value) => command.env(backup, value),
-            None => command.env_remove(backup),
-        };
-    }
-}
-
-fn write_executable(path: &Path, script: &str) -> TestResult {
-    fs::write(path, script)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-fn executable_fixture_dir() -> TestResult<tempfile::TempDir> {
-    // The test binary's directory supports execution even if TMPDIR is mounted noexec.
-    let binary = env::current_exe()?;
-    let directory = binary
-        .parent()
-        .ok_or_else(|| format!("Test binary {} has no parent directory", binary.display()))?;
-    Ok(tempfile::tempdir_in(directory)?)
-}
-
-fn write_tool_wrapper(path: &Path, tool: &str) -> TestResult {
-    let mut script = String::from("#!/bin/sh\n");
-    for (name, backup) in XDG_CONFIG_VARIABLES {
-        script.push_str(&format!(
-            r#"if [ "${{{backup}+x}}" = x ]; then
-    export {name}="${backup}"
-else
-    unset {name}
-fi
-unset {backup}
-"#
-        ));
-    }
-    script.push_str(&format!("exec {tool} \"$@\"\n"));
-    write_executable(path, &script)
-}
 
 #[test]
 fn tool_wrappers_restore_caller_xdg() -> TestResult {
@@ -281,7 +219,7 @@ printf '%s\0' "${XDG_CONFIG_HOME+x}" "${XDG_CONFIG_HOME-}" \
     for tool in ["podman", "skopeo"] {
         write_executable(&directory.join(tool), stub)?;
         let wrapper = directory.join(format!("configured-{tool}"));
-        write_tool_wrapper(&wrapper, tool)?;
+        write_tool_wrapper(&wrapper, &format!("exec {tool} \"$@\"\n"))?;
 
         for [home, dirs] in [
             [
@@ -356,7 +294,7 @@ fn rootless_store_smoke() -> TestResult {
     )?;
     for tool in ["podman", "skopeo"] {
         let configured_tool = tools.path().join(format!("configured-{tool}"));
-        write_tool_wrapper(&configured_tool, tool)?;
+        write_tool_wrapper(&configured_tool, &format!("exec {tool} \"$@\"\n"))?;
     }
     // Persist the store parent's directory entry before either import initializes a store.
     File::open(directory.parent().unwrap())?.sync_all()?;
@@ -494,18 +432,4 @@ fn fixture_tag_exists(context: &TransferContext, source: &ImageSelector) -> Test
         Some(1) => Ok(false),
         _ => Err(format!("Podman image exists {source} failed ({status})").into()),
     }
-}
-
-fn run(command: &mut Command) -> TestResult<String> {
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "{command:?} failed ({})\n{}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(String::from_utf8(output.stdout)?)
 }

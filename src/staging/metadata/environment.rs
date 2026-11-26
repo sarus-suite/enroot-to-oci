@@ -11,13 +11,12 @@ use std::{
     path::Path,
 };
 
-pub(super) fn prepare(
+pub(super) fn generate_changes(
     environment_file: &Path,
     mut policy: HostEnvPolicy,
     locale: &CharacterLocale,
     leading_space: &Pattern<'_>,
-    changes: &mut Vec<OsString>,
-) -> Result<(), StageError> {
+) -> Result<Vec<OsString>, StageError> {
     let assignment_name = Pattern::new(locale, c"^[[:alpha:]_][[:alnum:]_]*$")?;
     let trailing_space = Pattern::new(locale, c"[[:space:]]*$")?;
     let diagnostic = |error| StageError::io("Cannot read staged /etc/environment", error);
@@ -83,10 +82,7 @@ pub(super) fn prepare(
         assignments.set(name, value, line_number);
     }
 
-    for change in assignments.into_changes() {
-        changes.push(change?);
-    }
-    Ok(())
+    assignments.into_changes().collect()
 }
 
 type Assignment<'line> = (&'line [u8], &'line [u8]);

@@ -90,12 +90,16 @@ fn checked_metadata(path: &Path, image_path: &str) -> Result<Option<Metadata>, S
     Ok(metadata)
 }
 
-pub(super) fn prepare(rootfs: &Path, options: StageOptions) -> Result<Vec<OsString>, StageError> {
+pub(super) fn generate_changes(
+    rootfs: &Path,
+    options: StageOptions,
+) -> Result<Vec<OsString>, StageError> {
     let files = ConfigFiles::inspect(rootfs)?;
     let locale = CharacterLocale::activate()?;
     let leading_space = Pattern::new(&locale, c"^[[:space:]]*")?;
     let mut changes = Vec::new();
 
+    // RC script
     if let Some(rc) = files.rc {
         prepare_rc(
             rootfs,
@@ -108,18 +112,23 @@ pub(super) fn prepare(rootfs: &Path, options: StageOptions) -> Result<Vec<OsStri
         eprintln!("WARNING: no /etc/rc; using /bin/sh as a fallback entrypoint");
         changes.push(r#"ENTRYPOINT ["/bin/sh"]"#.into());
     }
+
+    // Environment variables
     if let Some(environment_file) = files.environment {
-        environment::prepare(
+        changes.extend(environment::generate_changes(
             &environment_file,
             options.host_env,
             &locale,
             &leading_space,
-            &mut changes,
-        )?;
+        )?);
     }
+
+    // fstab mounts
     if let Some(fstab) = files.fstab {
         warn_about_mounts(&fstab, &leading_space)?;
     }
+
+    // Final integrity check
     if changes.iter().any(|change| change.as_bytes().contains(&0)) {
         return Err(StageError::validation(
             "Image metadata contains a NUL byte unsupported by Podman import",

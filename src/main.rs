@@ -1,5 +1,5 @@
 use clap::Parser;
-use enroot_to_oci::load_transfer_settings;
+use enroot_to_oci::{HostEnvPolicy, StageOptions, convert_image};
 use hpc_image_store::ImageSelector;
 use std::{path::PathBuf, process::ExitCode};
 
@@ -33,23 +33,45 @@ struct Cli {
     #[arg(value_name = "IMAGE.sqsh")]
     image: PathBuf,
 
-    /// Requested CAS destination selector
-    #[arg(value_name = "IMAGE_TAG")]
+    /// Requested CAS destination with an explicit tag
+    #[arg(value_name = "IMAGE_TAG", value_parser = parse_destination)]
     destination: ImageSelector,
+}
+
+fn parse_destination(value: &str) -> Result<ImageSelector, String> {
+    let destination = ImageSelector::new(value).map_err(|error| error.to_string())?;
+    if destination.tag().is_none() {
+        return Err("CAS destination requires an explicit tag".into());
+    }
+    Ok(destination)
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-
-    if let Err(error) = load_transfer_settings(cli.store.as_deref()) {
-        eprintln!("{error}");
-        return ExitCode::FAILURE;
+    let options = StageOptions {
+        host_env: if cli.skip_dynamic_env {
+            HostEnvPolicy::Skip
+        } else if cli.resolve_host_env {
+            HostEnvPolicy::Resolve
+        } else {
+            HostEnvPolicy::Prompt
+        },
+        allow_unrecognized_rc: cli.allow_unrecognized_rc,
+    };
+    match convert_image(&cli.image, &cli.destination, cli.store.as_deref(), options) {
+        Ok(report) => {
+            if let Some(digest) = &report.ignored_destination_digest {
+                eprintln!(
+                    "WARNING: Ignored destination digest {digest} for {}",
+                    report.local_ref
+                );
+            }
+            println!("Published {} {}", report.local_ref, report.stored_root);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(error.exit_code())
+        }
     }
-
-    eprintln!(
-        "SquashFS conversion is pending: {} to {}",
-        cli.image.display(),
-        cli.destination
-    );
-    ExitCode::FAILURE
 }

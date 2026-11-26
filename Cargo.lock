@@ -303,6 +303,7 @@ name = "enroot-to-oci"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "getrandom",
  "hpc-image-store",
  "libc",
  "raster",

@@ -14,6 +14,7 @@ enroot-to-oci [--store PATH] [--skip-dynamic-env | --resolve-host-env] [--allow-
   Accept options anywhere before `--`, including `--store PATH` and `--store=PATH`.
   Allow one `--store` option and treat repeated boolean flags as a single occurrence.
   Use the store library's `ImageSelector` to parse `IMAGE_TAG` as the requested CAS destination.
+  Require an explicit tag. A digest-only destination is a usage error before extraction.
   Clap prints `-h` and `--help` to stdout with status 0 and reports invalid usage, including conflicting environment flags, to stderr with status 2.
   Return errors for configuration and conversion failures.
   [hpc-image-store CLI](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/src/main.rs), [sarusctl CLI](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/sarusctl/src/main.rs)
@@ -100,12 +101,35 @@ using an isolated rootless overlay store. The ACL case skipped because the
 fixture ACL was unavailable after extraction. The device-node case skipped
 because the runner could not create the fixture device.
 
-## 3. Publish the staged image to the CAS
+## 3. Publish the staged image to the CAS (implemented)
 
-- [ ] Stage under a unique converter-owned Podman tag for each invocation. Once both pipeline children succeed, construct separate source and destination selectors and call `Store::import(&source, Some(&destination), &context, &ImportOptions::default())` on the configured store. Staging and transfer must share a local containers-storage configuration, user, and namespace.
-- [ ] Use the hpc-image-store Cargo library directly. Podman and Skopeo are runtime dependencies of the library's transfer implementation. Leave CAS initialization, locking, publication, and recovery to the library and retain its default collision policy. Read the committed identity from `ImportReport.local_ref` and `ImportReport.stored_root`. [Store library guide](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/library-guide.md)
-- [ ] Release the extracted tree and remove the owned staging tag on success and handled failure. Preserve the primary error if cleanup also fails. If cleanup fails after the CAS commit, report the committed reference, digest, and any surviving staging tag.
-- [ ] **Acceptance:** Force CAS import to fail after successful staging and verify a failing exit, absence of a completion message, and staging cleanup. Exercise a destination conflict and verify the prior CAS digest survives. Seed an unrelated Podman tag, including one with the requested destination name, and verify cleanup preserves it.
+- [x] Stage under a unique converter-owned Podman tag for each invocation. Once both pipeline children succeed, construct separate source and destination selectors and call `Store::import(&source, Some(&destination), &context, &ImportOptions::default())` on the configured store. Staging and transfer must share a local containers-storage configuration, user, and namespace.
+- [x] Use the hpc-image-store Cargo library directly. Podman and Skopeo are runtime dependencies of the library's transfer implementation. Leave CAS initialization, locking, publication, and recovery to the library and retain its default collision policy. Read the committed identity from `ImportReport.local_ref` and `ImportReport.stored_root`. [Store library guide](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/library-guide.md)
+  After a successful import of `name:tag@sha256:…`, warn on stderr that the destination digest was ignored.
+- [x] Release the extracted tree and remove the owned staging tag on success and handled failure. Preserve the primary error if cleanup also fails. After a successful commit, print `Published <local_ref> <stored_root>` to stdout and return status 0. A cleanup failure after commit also emits a warning on stderr that identifies any surviving staging tag.
+- [x] **Acceptance:** Force CAS import to fail after successful staging and verify a failing exit, absence of a completion message, and staging cleanup. Exercise a destination conflict and verify the prior CAS digest survives. Seed an unrelated Podman tag, including one with the requested destination name, and verify cleanup preserves it.
+
+### Stage 3 runner setup
+
+Run the publication test as an ordinary user with local rootless Podman,
+Skopeo, and squashfs-tools. Follow the Stage 1 requirements for the
+containers-storage configuration, user namespace, and prepared CAS parent.
+The test creates its own Sarus configuration, store, and fixture tags.
+
+```sh
+cargo build --locked
+cargo test --locked
+cargo test --locked --test stage_three rootless_publication -- --ignored --nocapture
+```
+
+On 2026-11-25, the publication test passed as `vscode` with Podman 5.4.2
+using isolated rootless overlay storage and Skopeo 1.18.0. The reported digest
+matched CAS resolution. Injecting a Skopeo copy failure removed the staging
+tag and suppressed the publication line. A destination conflict preserved the
+prior digest, and the seeded Podman tags retained their image IDs. Injecting
+a cleanup failure after commit produced the digest and a warning with the
+surviving tag, with status 0. The production CLI mock test also confirmed
+that cleanup preserves the exit status of a failed tar process.
 
 ## 4. Release against a rootless CAS round trip
 

@@ -1,5 +1,7 @@
+mod conversion;
 mod staging;
 
+pub use conversion::{ConversionError, convert_image};
 pub use staging::{HostEnvPolicy, StageError, StageOptions, stage_image};
 
 use hpc_image_store::{StoreConfig, TransferContext};
