@@ -1,0 +1,167 @@
+name: Linux release build
+run-name: ${{ github.ref }}
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['**']
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  find-artifacts:
+    name: Find existing tag artifacts
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      run-id: ${{ steps.find.outputs.run-id }}
+    steps:
+      - name: Select the latest complete build for the release tag
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          run_ids=$(gh api --paginate --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/linux-build.yml/runs" \
+            -f head_sha="$GITHUB_SHA" -f status=success -F per_page=100 |
+            jq -sr --arg ref "$GITHUB_REF" --arg repo "$GITHUB_REPOSITORY" '
+              [.[].workflow_runs[] | select(
+                .display_title == $ref and .head_repository.full_name == $repo and
+                (.event == "push" or .event == "workflow_dispatch" or .event == "release")
+              )] | sort_by(.run_number) | reverse | .[].id
+            ')
+
+          if [[ -n "$run_ids" ]]; then
+            while IFS= read -r run_id; do
+              names=$(gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" |
+                jq -r '.artifacts[] | select(.expired == false) | .name')
+              if grep -Fxq enroot-to-oci-linux-x86_64 <<< "$names" &&
+                 grep -Fxq enroot-to-oci-linux-aarch64 <<< "$names"; then
+                printf 'Reusing artifacts from run %s.\n' "$run_id"
+                printf 'run-id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done <<< "$run_ids"
+          fi
+          echo 'No complete build is available for this tag and commit.'
+
+  build:
+    name: Build in Debian 12 (${{ matrix.architecture }})
+    needs: find-artifacts
+    if: >-
+      ${{ !cancelled() && !github.event.deleted &&
+          (needs.find-artifacts.result == 'skipped' ||
+           (needs.find-artifacts.result == 'success' && !needs.find-artifacts.outputs.run-id)) }}
+    strategy:
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and check the release executable
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
+        with:
+          configFile: .devcontainer/release/devcontainer.json
+          push: never
+          runCmd: sh .devcontainer/release/build.sh ${{ matrix.architecture }}
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: target/release-artifacts/enroot-to-oci-linux-${{ matrix.architecture }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+  attach-assets:
+    name: Attach binaries to the published release
+    needs: [find-artifacts, build]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'release' && needs.find-artifacts.result == 'success' &&
+          (needs.build.result == 'success' ||
+           (needs.build.result == 'skipped' && needs.find-artifacts.outputs.run-id != '')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: release-assets-${{ github.event.release.id }}
+      cancel-in-progress: false
+    steps:
+      - name: Download both executables
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.find-artifacts.outputs.run-id || github.run_id }}
+          pattern: enroot-to-oci-linux-*
+          path: release-assets
+          merge-multiple: true
+      - name: Upload missing release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        shell: bash
+        run: |
+          assets=(enroot-to-oci-linux-x86_64 enroot-to-oci-linux-aarch64)
+          for asset in "${assets[@]}"; do
+            if [[ ! -s "release-assets/$asset" ]]; then
+              echo "Missing or empty executable: $asset" >&2
+              exit 1
+            fi
+          done
+
+          tag_refs=$(git ls-remote --exit-code "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+            "$GITHUB_REF" "$GITHUB_REF^{}")
+          tag_commit=$(awk -v ref="$GITHUB_REF" '
+            $2 == ref { tag = $1 }
+            $2 == ref "^{}" { commit = $1 }
+            END { print commit ? commit : tag }
+          ' <<< "$tag_refs")
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "The tag $GITHUB_REF no longer points to $GITHUB_SHA." >&2
+            exit 1
+          fi
+
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")
+          if ! jq -e --arg tag "$GITHUB_REF_NAME" '.tag_name == $tag and .draft == false' \
+             <<< "$release" > /dev/null; then
+            echo "Release $RELEASE_ID is no longer published for $GITHUB_REF_NAME." >&2
+            exit 1
+          fi
+          upload_url=$(jq -er '.upload_url' <<< "$release")
+          upload_url=${upload_url%%\{*}
+
+          for asset in "${assets[@]}"; do
+            state=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .state' <<< "$release")
+            if [[ "$state" == uploaded ]]; then
+              echo "Release already contains $asset."
+              continue
+            fi
+            if [[ -n "$state" ]]; then
+              echo "Release asset $asset is in state $state. Remove the incomplete asset before retrying." >&2
+              exit 1
+            fi
+            if [[ $(jq -r '.immutable' <<< "$release") == true ]]; then
+              echo "Release $RELEASE_ID is immutable and cannot accept $asset." >&2
+              exit 1
+            fi
+            curl --fail --silent --show-error --output /dev/null \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@release-assets/$asset" "$upload_url?name=$asset"
+            echo "Uploaded $asset."
+          done
