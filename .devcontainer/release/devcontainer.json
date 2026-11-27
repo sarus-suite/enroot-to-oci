@@ -1,0 +1,8 @@
+{
+  "name": "Debian 12 release build",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true
+}

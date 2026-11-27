@@ -32,6 +32,20 @@ the parent directory. The store library initializes a missing CAS directory.
 Use a path without a colon so Skopeo can address the OCI layout.
 [Sarus store administration](https://github.com/sarus-suite/cluster-tooling/blob/49c6f24716e08bc16b5e31cf8779cb957afc411d/crates/hpc-image-store/docs/administration.md)
 
+### Linux release builds
+
+Use the "Debian 12 release build" devcontainer (`.devcontainer/release/`)
+and run the dedicated build script from the repository root:
+
+```sh
+sh .devcontainer/release/build.sh
+```
+
+The build writes a dynamically linked executable to `target/release-artifacts/`.
+The runtime baseline is glibc 2.36 and the GCC runtime library `libgcc_s.so.1`.
+The same devcontainer is used to produce build artifacts in the
+"Linux release build" GitHub Actions workflow.
+
 ## Convert an image
 
 ```text
